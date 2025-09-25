@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Torre de Maná - Exportar Bestsellers CSV (robusto)
+// @name         Torre de Maná - Exporter Bestsellers Magic: The Gathering Cards
 // @namespace    https://waykey.com.br/
-// @version      1.1.0
-// @description  Botão para exportar CSV de bestsellers (scraping do HTML paginado) com detecção robusta de rota/SPA
+// @version      1.2.2
+// @description  Exporta CSV de bestsellers
 // @author       IgorFollador
 // @match        https://www.torredemana.com.br/*
 // @match        http://www.torredemana.com.br/*
@@ -18,41 +18,30 @@
   const VIEW_REGEX = /ecom\/admin\/stats\/bestsellers/i;
   const CSV_HEADERS = ['rank','quant_vend','card','edicao','menor_preco','preco_medio','maior_preco'];
 
-  let injected = false; // evita duplicar botão
-  let btn, statusBox;
+  let injected = false;
+  let btn, statusBox, pagesWrap, pagesInput;
 
   function log(...args){ console.log('[TM-Bestsellers]', ...args); }
 
   GM_addStyle(`
     .tm-export-btn {
-      position: fixed;
-      z-index: 999999;
-      right: 16px;
-      bottom: 16px;
-      padding: 10px 14px;
-      background: #0ea5e9;
-      color: #fff !important;
-      font-weight: 600;
-      border-radius: 10px;
-      box-shadow: 0 4px 14px rgba(0,0,0,.2);
-      cursor: pointer;
-      user-select: none;
+      position: fixed; z-index: 999999; right: 16px; bottom: 16px; padding: 10px 14px;
+      background: #0ea5e9; color: #fff !important; font-weight: 600; border-radius: 10px;
+      box-shadow: 0 4px 14px rgba(0,0,0,.2); cursor: pointer; user-select: none;
     }
     .tm-export-btn:hover { filter: brightness(0.95); }
     .tm-export-status {
-      position: fixed;
-      z-index: 999999;
-      right: 16px;
-      bottom: 60px;
-      padding: 8px 12px;
-      background: #111827;
-      color: #fff;
-      font-size: 12px;
-      border-radius: 8px;
-      opacity: 0.9;
-      max-width: 50vw;
-      white-space: pre-wrap;
-      line-height: 1.3;
+      position: fixed; z-index: 999999; right: 16px; bottom: 60px; padding: 8px 12px;
+      background: #111827; color: #fff; font-size: 12px; border-radius: 8px; opacity: 0.9;
+      max-width: 50vw; white-space: pre-wrap; line-height: 1.3;
+    }
+    .tm-pages-wrap {
+      position: fixed; z-index: 999999; right: 16px; bottom: 66px; display: flex; gap: 8px; align-items: center;
+      background: #0b1220; color: #e5e7eb; padding: 6px 10px; border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.2);
+    }
+    .tm-pages-wrap label { font-size: 12px; opacity: .9; }
+    .tm-pages-input {
+      width: 90px; padding: 6px 8px; border-radius: 8px; border: 1px solid #374151; background:#111827; color:#e5e7eb; outline: none;
     }
   `);
 
@@ -60,26 +49,30 @@
     try{
       const u = new URL(loc);
       const raw = u.searchParams.get('view') || '';
-      // raw pode vir já decodificado por alguns routers;
-      // garantimos uma versão “normalizada”:
-      const norm = decodeURIComponent(raw || '').replace(/%2F/gi,'/'); // redundante, mas seguro
+      const norm = decodeURIComponent(raw || '').replace(/%2F/gi,'/');
       return norm || raw;
-    }catch(e){
-      return '';
-    }
+    }catch(e){ return ''; }
+  }
+
+  function looksLikeBestsellersDOM() {
+    const ths = Array.from(document.querySelectorAll('table thead th')).map(th => th.textContent.trim().toLowerCase());
+    const probe = ['rank','#','quant','vend','edição','edicao','menor','maior'];
+    return probe.some(p => ths.some(h => h.includes(p)));
   }
 
   function isOnBestsellersPage(){
     const view = getViewFromLocation();
     const hrefHasEncoded = /view=ecom%2Fadmin%2Fstats%2Fbestsellers/i.test(location.search);
-    const ok = VIEW_REGEX.test(view) || hrefHasEncoded;
-    log('view:', view, 'encodedMatch?', hrefHasEncoded, 'isOn?', ok);
+    const hrefLoose = /bestsellers/i.test(location.href);
+    const domHeuristic = looksLikeBestsellersDOM();
+    const ok = VIEW_REGEX.test(view) || hrefHasEncoded || hrefLoose || domHeuristic || window.__TM_FORCE === true;
+    log('view:', view, 'encoded?', hrefHasEncoded, 'hrefLoose?', hrefLoose, 'dom?', domHeuristic, 'isOn?', ok);
     return ok;
   }
 
   function ensureUI(){
-    if (!document.body) return;                       // segurança
-    if (!isOnBestsellersPage()) { removeUI(); return; } // não está na página alvo
+    if (!document.body) return;
+    if (!isOnBestsellersPage()) { removeUI(); return; }
     if (injected) return;
 
     btn = document.createElement('div');
@@ -91,17 +84,35 @@
     statusBox.className = 'tm-export-status';
     statusBox.style.display = 'none';
 
+    pagesWrap = document.createElement('div');
+    pagesWrap.className = 'tm-pages-wrap';
+    const pagesLabel = document.createElement('label');
+    pagesLabel.textContent = 'Páginas a exportar';
+    pagesInput = document.createElement('input');
+    pagesInput.type = 'number';
+    pagesInput.min = '0';
+    pagesInput.step = '1';
+    pagesInput.placeholder = '0 = todas';
+    pagesInput.className = 'tm-pages-input';
+    const saved = localStorage.getItem('tm_bests_pages') || '';
+    if (saved) pagesInput.value = saved;
+    pagesInput.addEventListener('change', () => {
+      localStorage.setItem('tm_bests_pages', (pagesInput.value || '').trim());
+    });
+    pagesWrap.appendChild(pagesLabel);
+    pagesWrap.appendChild(pagesInput);
+
     document.body.appendChild(btn);
+    document.body.appendChild(pagesWrap);
     document.body.appendChild(statusBox);
     injected = true;
-    log('Botão injetado.');
+    log('UI pronta.');
   }
 
   function removeUI(){
-    if (btn && btn.parentNode) btn.parentNode.removeChild(btn);
-    if (statusBox && statusBox.parentNode) statusBox.parentNode.removeChild(statusBox);
-    btn = null; statusBox = null; injected = false;
-    log('UI removida (não estamos na página alvo).');
+    for (const el of [btn,statusBox,pagesWrap]) if (el && el.parentNode) el.parentNode.removeChild(el);
+    btn = null; statusBox = null; pagesWrap = null; pagesInput = null; injected = false;
+    log('UI removida.');
   }
 
   function setStatus(msg){
@@ -112,14 +123,16 @@
   function hideStatus(){ if (statusBox) statusBox.style.display = 'none'; }
 
   const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
   function toCSVLine(values) {
-    return values.map(v=>{
+    return values.map(v => {
       let s = v == null ? '' : String(v);
-      if (s.includes('"')) s = s.replace(/"/g,'""');
-      if (s.includes(';') || s.includes('\n') || s.includes('"')) s = `"${s}"`;
+      if (s.includes('"')) s = s.replace(/"/g, '""');
+      if (/[,\n;"]/.test(s)) s = `"${s}"`;
       return s;
     }).join(';');
   }
+
   function downloadCSV(rows, filenameBase='bestsellers'){
     const header = toCSVLine(CSV_HEADERS);
     const body = rows.map(r => toCSVLine([r.rank,r.quant_vend,r.card,r.edicao,r.menor_preco,r.preco_medio,r.maior_preco]));
@@ -137,7 +150,6 @@
   }
 
   async function fetchHTML(url) {
-    // tenta fetch com cookies; se der ruim (CF), tenta GM_xmlhttpRequest
     try{
       const res = await fetch(url, { credentials:'include' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -160,6 +172,24 @@
   function parseDocument(htmlString){
     const parser = new DOMParser();
     return parser.parseFromString(htmlString, 'text/html');
+  }
+
+  function normalizePrice(s) {
+    if (!s) return '';
+    let t = String(s).trim();
+
+    if (/^[-–—]+$/.test(t)) return '';
+
+    t = t.replace(/[Rr]\$|\s|\u00A0/gi, '');
+    t = t.replace(/\.(?=\d{3}\b)/g, '');
+    if (!t.includes(',')) t = t.replace(/\./g, '');
+    t = t.replace(/,/g, '.');
+
+    const match = t.match(/^-?\d+(?:\.\d+)?$/);
+    if (match) return match[0];
+
+    const num = t.match(/-?\d+(?:\.\d+)?/);
+    return num ? num[0] : '';
   }
 
   function extractRowsFromDoc(doc){
@@ -187,14 +217,19 @@
       const tds = Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim());
       if (!tds.length) continue;
       const get = (i)=> (i>=0 && i<tds.length ? tds[i] : '');
+
+      const menor = normalizePrice(get(idxMin));
+      const medio = normalizePrice(get(idxAvg));
+      const maior = normalizePrice(get(idxMax));
+
       const row = {
         rank: get(idxRank),
         quant_vend: get(idxQtd),
         card: get(idxCard),
         edicao: get(idxEd),
-        menor_preco: get(idxMin),
-        preco_medio: get(idxAvg),
-        maior_preco: get(idxMax),
+        menor_preco: menor,
+        preco_medio: medio,
+        maior_preco: maior,
       };
       if (Object.values(row).some(v => v && v.length)) rows.push(row);
     }
@@ -219,6 +254,14 @@
     return url;
   }
 
+  function getUserMaxPages(total){
+    const raw = (pagesInput && pagesInput.value || '').trim();
+    if (!raw) return total;
+    const n = Math.max(0, parseInt(raw, 10) || 0);
+    if (n === 0) return total;
+    return Math.min(n, total);
+  }
+
   async function exportAllPages(){
     try{
       if (!btn) return;
@@ -227,33 +270,26 @@
       setStatus('Iniciando scraping...');
 
       const base = buildBaseURL();
-      log('Base URL', base.toString());
-
       setStatus('Baixando página 1...');
       const firstHTML = await fetchHTML(base.toString());
       const firstDoc  = parseDocument(firstHTML);
       const firstRows = extractRowsFromDoc(firstDoc);
-      if (!firstRows.length){
-        setStatus('Não encontrei linhas na página 1. Verifique filtros/login.');
-        return;
-      }
+      if (!firstRows.length){ setStatus('Não encontrei linhas na página 1. Verifique filtros/login.'); return; }
 
       const totalPages = detectTotalPages(firstDoc) || 1;
-      setStatus(`Páginas detectadas: ${totalPages}. Processando...`);
+      const maxToFetch = getUserMaxPages(totalPages);
+      setStatus(`Páginas detectadas: ${totalPages}. Exportando até ${maxToFetch}.`);
 
       let allRows = [...firstRows];
-      for (let page=2; page<=3; page++){
+      for (let page=2; page<=maxToFetch; page++){
         await delay(300);
-        setStatus(`Baixando página ${page}/${totalPages}...`);
+        setStatus(`Baixando página ${page}/${maxToFetch}...`);
         const u = new URL(base.toString());
         u.searchParams.set('page', String(page));
         const html = await fetchHTML(u.toString());
         const doc  = parseDocument(html);
         const rows = extractRowsFromDoc(doc);
-        if (!rows.length){
-          setStatus(`Página ${page} sem linhas. Encerrando na ${page-1}.`);
-          break;
-        }
+        if (!rows.length){ setStatus(`Página ${page} sem linhas. Encerrando na ${page-1}.`); break; }
         allRows = allRows.concat(rows);
       }
 
@@ -273,20 +309,13 @@
     }
   }
 
-  // injeta quando o DOM estiver pronto
   function boot(){
     try{
       ensureUI();
-      // Observa mudanças no body (SPA/PJAX)
-      const obs = new MutationObserver(() => {
-        // Em cada mudança relevante tentamos (re)injetar ou remover se saiu da página alvo
-        ensureUI();
-      });
+      const obs = new MutationObserver(() => { ensureUI(); });
       obs.observe(document.documentElement || document.body, { childList:true, subtree:true });
       log('Observer ligado.');
-    }catch(e){
-      log('boot error', e);
-    }
+    }catch(e){ log('boot error', e); }
   }
 
   if (document.readyState === 'loading'){
@@ -295,4 +324,3 @@
     boot();
   }
 })();
-
